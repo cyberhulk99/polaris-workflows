@@ -10,6 +10,13 @@ on:
       app_key:
         required: true
         type: string
+      # Where the ingestion endpoint actually lives — a tunnel URL in local
+      # dev, the real public hostname once deployed. Templated per-repo by
+      # the onboarding automation from the middleware's own PUBLIC_BASE_URL,
+      # so there's exactly one place this ever needs to change.
+      polaris_url:
+        required: true
+        type: string
 
 permissions:
   contents: read
@@ -100,4 +107,4 @@ jobs:
             -H "Authorization: Bearer ${{ steps.oidc.outputs.token }}" \
             -H "Content-Type: application/sarif+json" \
             --data-binary @semgrep.sarif \
-            "https://polaris.tripsure.internal/ingest/scr?app_key=${{ inputs.app_key }}&commit=${{ github.sha }}&pr=${PR_NUMBER:-0}"
+            "${{ inputs.polaris_url }}/ingest/scr?app_key=${{ inputs.app_key }}&commit=${{ github.sha }}&pr=${PR_NUMBER:-0}"
