@@ -17,10 +17,11 @@ on:
       polaris_url:
         required: true
         type: string
-      # Owner of the optional <owner>/security-rules repo holding
-      # business-logic Semgrep rules — same owner as this workflows repo by
-      # convention. Scanning still works fully without it existing.
-      rules_repo_owner:
+      # The "owner/repo" holding optional org-specific business-logic
+      # Semgrep rules under rules/semgrep/ — this is the same repo as the
+      # one hosting this reusable workflow by convention (no separate repo
+      # needed just for rules). Scanning still works fully without it.
+      rules_repo:
         required: true
         type: string
 
@@ -45,14 +46,14 @@ jobs:
       # price-tampering / IDOR checks in rules/semgrep/) isn't required for
       # scanning to work at all — community rules alone are useful from day
       # one. This step never fails the job; it just quietly adds the extra
-      # config if that repo exists yet.
+      # config if that folder exists in the workflows repo.
       - name: Pull org security rules (optional)
         continue-on-error: true
         run: |
-          if git clone --depth 1 "https://github.com/${{ inputs.rules_repo_owner }}/security-rules.git" /tmp/security-rules 2>/dev/null; then
+          if git clone --depth 1 "https://github.com/${{ inputs.rules_repo }}.git" /tmp/security-rules 2>/dev/null; then
             echo "org rules found"
           else
-            echo "no org rules repo yet — scanning with community rules only"
+            echo "no org rules yet — scanning with community rules only"
           fi
 
       - name: Install Semgrep
@@ -92,9 +93,22 @@ jobs:
             --config p/golang
             --config p/java
             --config p/docker
+            # Vulnerability-class packs — narrower than owasp-top-ten/cwe-top-25
+            # but purpose-built, so they catch variants those broader packs miss.
+            --config p/sql-injection
+            --config p/command-injection
+            --config p/jwt
+            --config p/insecure-transport
+            # Framework-specific packs — where most real injection sinks
+            # actually live (raw queries, template rendering, request routing).
+            --config p/flask
+            --config p/django
+            --config p/expressjs
+            --config p/nodejsscan
+            --config p/react
           )
-          if [ -d /tmp/security-rules/semgrep ]; then
-            CONFIG_ARGS+=(--config /tmp/security-rules/semgrep)
+          if [ -d /tmp/security-rules/rules/semgrep ]; then
+            CONFIG_ARGS+=(--config /tmp/security-rules/rules/semgrep)
           fi
           semgrep scan \
             "${CONFIG_ARGS[@]}" \
@@ -132,6 +146,13 @@ jobs:
         id: codeql-init
         continue-on-error: true
         uses: github/codeql-action/init@v3
+        with:
+          # The default query suite is narrower than this. security-extended
+          # adds the broader taint-tracking queries that are CodeQL's actual
+          # advantage over Semgrep/Bandit for injection specifically —
+          # following untrusted input through several calls to wherever it
+          # lands, not just matching a local pattern.
+          queries: security-extended
 
       - name: CodeQL autobuild
         if: steps.codeql-init.outcome == 'success'
