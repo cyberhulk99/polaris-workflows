@@ -74,6 +74,10 @@ jobs:
         uses: gitleaks/gitleaks-action@v2
         env:
           GITLEAKS_ENABLE_UPLOAD_ARTIFACT: false
+          # gitleaks-action needs this to fetch PR file context via the API
+          # for pull_request-triggered scans — the workflow's own built-in
+          # token, not a secret anyone has to create.
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Upload SARIF to GitHub code scanning
         uses: github/codeql-action/upload-sarif@v3
