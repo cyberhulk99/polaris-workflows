@@ -1,4 +1,4 @@
-# Reusable workflow — lives in tripsure/polaris-workflows so every onboarded
+# Reusable workflow — lives in <org>/polaris-workflows so every onboarded
 # repo's own .github/workflows/polaris-scr.yml is just a thin `uses:` call.
 # Updating a rule set or scanner version here rolls out to every application
 # on its next run, with no per-repo changes.
@@ -17,12 +17,18 @@ on:
       polaris_url:
         required: true
         type: string
+      # Owner of the optional <owner>/security-rules repo holding
+      # business-logic Semgrep rules — same owner as this workflows repo by
+      # convention. Scanning still works fully without it existing.
+      rules_repo_owner:
+        required: true
+        type: string
 
 permissions:
   contents: read
   id-token: write        # required to request the OIDC token below
   pull-requests: read
-  security-events: write # required to upload SARIF to GitHub code scanning
+  security-events: write # only used by the (non-blocking) GitHub code-scanning upload below
 
 jobs:
   scr:
@@ -43,7 +49,7 @@ jobs:
       - name: Pull org security rules (optional)
         continue-on-error: true
         run: |
-          if git clone --depth 1 https://github.com/cyberhulk99/security-rules.git /tmp/security-rules 2>/dev/null; then
+          if git clone --depth 1 "https://github.com/${{ inputs.rules_repo_owner }}/security-rules.git" /tmp/security-rules 2>/dev/null; then
             echo "org rules found"
           else
             echo "no org rules repo yet — scanning with community rules only"
@@ -52,13 +58,20 @@ jobs:
       - name: Install Semgrep
         run: pip install semgrep
 
-      # Push to main -> full repository scan (also what the onboarding PR's
-      # merge commit triggers, so a newly onboarded repo's very first scan
-      # is a complete baseline). Pull request -> diff-aware scan: Semgrep
-      # still analyzes the whole repo (some rules need full context) but
-      # --baseline-commit filters the report down to findings whose code was
-      # actually touched since the PR's base, so an old, untouched finding
-      # elsewhere in the repo doesn't show up as PR noise on every PR.
+      # Push to a watched branch -> full repository scan (also what the
+      # onboarding PR's merge commit triggers, so a newly onboarded repo's
+      # very first CI scan is a complete baseline). Pull request -> diff-aware
+      # scan: Semgrep still analyzes the whole repo (some rules need full
+      # context) but --baseline-commit filters the report down to findings
+      # whose code was actually touched since the PR's base, so an old,
+      # untouched finding elsewhere in the repo doesn't show up as PR noise.
+      #
+      # Rule packs: OWASP/CWE community sets plus a broad language spread
+      # (Semgrep silently skips any pack whose language isn't present in the
+      # repo, so including packs for languages this repo doesn't use costs
+      # nothing) plus dedicated secrets and general security-audit packs,
+      # which catch classes of issues neither OWASP-Top-10 nor CWE-Top-25
+      # focus on.
       - name: Run Semgrep
         run: |
           BASELINE_ARGS=()
@@ -68,7 +81,18 @@ jobs:
           else
             echo "Full repository scan"
           fi
-          CONFIG_ARGS=(--config p/owasp-top-ten --config p/cwe-top-25)
+          CONFIG_ARGS=(
+            --config p/owasp-top-ten
+            --config p/cwe-top-25
+            --config p/security-audit
+            --config p/secrets
+            --config p/python
+            --config p/javascript
+            --config p/typescript
+            --config p/golang
+            --config p/java
+            --config p/docker
+          )
           if [ -d /tmp/security-rules/semgrep ]; then
             CONFIG_ARGS+=(--config /tmp/security-rules/semgrep)
           fi
@@ -76,6 +100,51 @@ jobs:
             "${CONFIG_ARGS[@]}" \
             --sarif --output semgrep.sarif \
             "${BASELINE_ARGS[@]}"
+
+      # Bandit is Python-specific AST analysis — catches patterns (e.g.
+      # unsafe deserialization, weak crypto idioms, assert-based checks that
+      # vanish under `python -O`) that Semgrep's pattern matching sometimes
+      # misses. Skipped entirely on repos with no Python, at zero cost.
+      - name: Detect Python
+        id: haspy
+        run: |
+          if find . -name '*.py' -not -path '*/node_modules/*' | grep -q .; then
+            echo "found=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "found=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Run Bandit
+        if: steps.haspy.outputs.found == 'true'
+        continue-on-error: true
+        run: |
+          pip install bandit bandit-sarif-formatter
+          bandit -r . -f sarif -o bandit.sarif || true
+
+      # CodeQL is the most thorough option here — the same engine GitHub
+      # itself uses — but it's genuinely heavier: a real per-language
+      # extraction/build step, and noticeably slower than Semgrep or Bandit.
+      # `continue-on-error` on all three steps means a CodeQL hiccup (e.g. an
+      # autobuild failure on an unusual build setup) never blocks the rest of
+      # the pipeline — Semgrep/Bandit results still ship either way.
+      # `languages` is left unset so CodeQL auto-detects what's in the repo.
+      - name: Initialize CodeQL
+        id: codeql-init
+        continue-on-error: true
+        uses: github/codeql-action/init@v3
+
+      - name: CodeQL autobuild
+        if: steps.codeql-init.outcome == 'success'
+        continue-on-error: true
+        uses: github/codeql-action/autobuild@v3
+
+      - name: Run CodeQL analysis
+        if: steps.codeql-init.outcome == 'success'
+        continue-on-error: true
+        uses: github/codeql-action/analyze@v3
+        with:
+          output: codeql-results
+          upload: false # we upload the merged SARIF ourselves below, not GitHub's own code-scanning path
 
       - name: Detect secrets (gitleaks)
         uses: gitleaks/gitleaks-action@v2
@@ -86,10 +155,26 @@ jobs:
           # token, not a secret anyone has to create.
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
+      # One combined document — Polaris ingests once per scan, not once per
+      # tool, and de-dupes by (repo, rule, file) regardless of which engine
+      # a given finding came from.
+      - name: Merge SARIF results
+        run: |
+          FILES=(semgrep.sarif)
+          [ -f bandit.sarif ] && FILES+=(bandit.sarif)
+          for f in codeql-results/*.sarif; do [ -f "$f" ] && FILES+=("$f"); done
+          echo "Merging: ${FILES[*]}"
+          jq -s '{"$schema": .[0]["$schema"], version: .[0].version, runs: (map(.runs) | add)}' "${FILES[@]}" > combined.sarif
+
+      # Best-effort only: this is GitHub's native code-scanning UI, which
+      # requires GitHub Advanced Security for private repositories. Polaris's
+      # own ingestion below is the real data path and doesn't depend on this
+      # succeeding at all.
       - name: Upload SARIF to GitHub code scanning
+        continue-on-error: true
         uses: github/codeql-action/upload-sarif@v3
         with:
-          sarif_file: semgrep.sarif
+          sarif_file: combined.sarif
 
       - name: Request OIDC token for Polaris
         id: oidc
@@ -106,5 +191,5 @@ jobs:
             -X POST \
             -H "Authorization: Bearer ${{ steps.oidc.outputs.token }}" \
             -H "Content-Type: application/sarif+json" \
-            --data-binary @semgrep.sarif \
+            --data-binary @combined.sarif \
             "${{ inputs.polaris_url }}/ingest/scr?app_key=${{ inputs.app_key }}&commit=${{ github.sha }}&pr=${PR_NUMBER:-0}"
