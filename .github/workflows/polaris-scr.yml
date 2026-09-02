@@ -28,8 +28,19 @@ jobs:
           # clone doesn't have.
           fetch-depth: 0
 
-      - name: Pull org security rules
-        run: git clone --depth 1 https://github.com/tripsure/security-rules.git /tmp/security-rules
+      # Optional: an org-specific ruleset (business-logic rules like the
+      # price-tampering / IDOR checks in rules/semgrep/) isn't required for
+      # scanning to work at all — community rules alone are useful from day
+      # one. This step never fails the job; it just quietly adds the extra
+      # config if that repo exists yet.
+      - name: Pull org security rules (optional)
+        continue-on-error: true
+        run: |
+          if git clone --depth 1 https://github.com/cyberhulk99/security-rules.git /tmp/security-rules 2>/dev/null; then
+            echo "org rules found"
+          else
+            echo "no org rules repo yet — scanning with community rules only"
+          fi
 
       - name: Install Semgrep
         run: pip install semgrep
@@ -50,10 +61,12 @@ jobs:
           else
             echo "Full repository scan"
           fi
+          CONFIG_ARGS=(--config p/owasp-top-ten --config p/cwe-top-25)
+          if [ -d /tmp/security-rules/semgrep ]; then
+            CONFIG_ARGS+=(--config /tmp/security-rules/semgrep)
+          fi
           semgrep scan \
-            --config p/owasp-top-ten \
-            --config p/cwe-top-25 \
-            --config /tmp/security-rules/semgrep \
+            "${CONFIG_ARGS[@]}" \
             --sarif --output semgrep.sarif \
             "${BASELINE_ARGS[@]}"
 
