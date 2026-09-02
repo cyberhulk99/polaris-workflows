@@ -1,0 +1,86 @@
+# Reusable workflow — lives in tripsure/polaris-workflows so every onboarded
+# repo's own .github/workflows/polaris-scr.yml is just a thin `uses:` call.
+# Updating a rule set or scanner version here rolls out to every application
+# on its next run, with no per-repo changes.
+name: Polaris SCR
+
+on:
+  workflow_call:
+    inputs:
+      app_key:
+        required: true
+        type: string
+
+permissions:
+  contents: read
+  id-token: write        # required to request the OIDC token below
+  pull-requests: read
+  security-events: write # required to upload SARIF to GitHub code scanning
+
+jobs:
+  scr:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # Full git history, not just the latest commit — --baseline-commit
+          # below needs to diff against an older commit, which a shallow
+          # clone doesn't have.
+          fetch-depth: 0
+
+      - name: Pull org security rules
+        run: git clone --depth 1 https://github.com/tripsure/security-rules.git /tmp/security-rules
+
+      - name: Install Semgrep
+        run: pip install semgrep
+
+      # Push to main -> full repository scan (also what the onboarding PR's
+      # merge commit triggers, so a newly onboarded repo's very first scan
+      # is a complete baseline). Pull request -> diff-aware scan: Semgrep
+      # still analyzes the whole repo (some rules need full context) but
+      # --baseline-commit filters the report down to findings whose code was
+      # actually touched since the PR's base, so an old, untouched finding
+      # elsewhere in the repo doesn't show up as PR noise on every PR.
+      - name: Run Semgrep
+        run: |
+          BASELINE_ARGS=()
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            echo "Diff-aware scan against base ${{ github.event.pull_request.base.sha }}"
+            BASELINE_ARGS=(--baseline-commit "${{ github.event.pull_request.base.sha }}")
+          else
+            echo "Full repository scan"
+          fi
+          semgrep scan \
+            --config p/owasp-top-ten \
+            --config p/cwe-top-25 \
+            --config /tmp/security-rules/semgrep \
+            --sarif --output semgrep.sarif \
+            "${BASELINE_ARGS[@]}"
+
+      - name: Detect secrets (gitleaks)
+        uses: gitleaks/gitleaks-action@v2
+        env:
+          GITLEAKS_ENABLE_UPLOAD_ARTIFACT: false
+
+      - name: Upload SARIF to GitHub code scanning
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: semgrep.sarif
+
+      - name: Request OIDC token for Polaris
+        id: oidc
+        run: |
+          TOKEN=$(curl -sS -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
+            "$ACTIONS_ID_TOKEN_REQUEST_URL&audience=polaris-ingest" | jq -r '.value')
+          echo "::add-mask::$TOKEN"
+          echo "token=$TOKEN" >> "$GITHUB_OUTPUT"
+
+      - name: Send results to Polaris
+        run: |
+          PR_NUMBER="${{ github.event.pull_request.number }}"
+          curl -sS --fail \
+            -X POST \
+            -H "Authorization: Bearer ${{ steps.oidc.outputs.token }}" \
+            -H "Content-Type: application/sarif+json" \
+            --data-binary @semgrep.sarif \
+            "https://polaris.tripsure.internal/ingest/scr?app_key=${{ inputs.app_key }}&commit=${{ github.sha }}&pr=${PR_NUMBER:-0}"
