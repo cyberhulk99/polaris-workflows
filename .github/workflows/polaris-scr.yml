@@ -113,7 +113,14 @@ jobs:
           semgrep scan \
             "${CONFIG_ARGS[@]}" \
             --sarif --output semgrep.sarif \
-            "${BASELINE_ARGS[@]}"
+            "${BASELINE_ARGS[@]}" || true
+          # Semgrep exits non-zero when findings match certain
+          # registry-tagged "blocking" rules — that's meant for `semgrep ci`
+          # gating a build directly. Polaris does its own severity/blocking
+          # decisions downstream (console, PR comments), so a non-zero exit
+          # here must never stop the job before results even reach
+          # ingestion — only a genuinely missing/corrupt SARIF output should.
+          test -f semgrep.sarif
 
       # Bandit is Python-specific AST analysis — catches patterns (e.g.
       # unsafe deserialization, weak crypto idioms, assert-based checks that
