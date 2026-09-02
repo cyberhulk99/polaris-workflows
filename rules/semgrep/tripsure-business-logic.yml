@@ -1,0 +1,39 @@
+rules:
+  - id: tripsure-client-trusted-price
+    languages: [java, typescript, javascript, csharp, kotlin, python, ruby, php]
+    severity: ERROR
+    message: >-
+      A price/amount value from the request body is used directly instead of
+      being recomputed from the authoritative rate table. This lets a
+      modified request book at an attacker-chosen price.
+    metadata:
+      cwe: "CWE-602: Client-Side Enforcement of Server-Side Security"
+      references:
+        - https://cwe.mitre.org/data/definitions/602.html
+    patterns:
+      - pattern-either:
+          - pattern: $CHARGE = $REQUEST.price
+          - pattern: $CHARGE = $REQUEST.amount
+          - pattern: $CHARGE = $REQUEST.getPrice()
+      - pattern-not-inside: |
+          $RATE = ...
+          ...
+          $CHARGE = $RATE
+
+  - id: tripsure-sequential-id-lookup
+    languages: [java, csharp, typescript, javascript, kotlin, go, python, ruby, php]
+    severity: WARNING
+    message: >-
+      A resource is looked up by a sequential/numeric identifier taken
+      directly from the request with no visible ownership check nearby.
+      Verify the caller is authorized for this specific record (CWE-639,
+      insecure direct object reference).
+    metadata:
+      cwe: "CWE-639: Authorization Bypass Through User-Controlled Key"
+    patterns:
+      - pattern-either:
+          - pattern: $REPO.findById($REQUEST.id)
+          - pattern: $REPO.getById($REQUEST.id)
+      - pattern-not-inside: |
+          ...
+          if (... $OWNER ...) { ... }
