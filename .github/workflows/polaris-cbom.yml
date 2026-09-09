@@ -90,6 +90,23 @@ jobs:
         if: github.event_name == 'push'
         run: npm install -g @cyclonedx/cdxgen@12.8.4
 
+      # cdxgen's deep crypto detection (the "atom" reachability/usage
+      # analysis that traces actual crypto API calls in source, not just
+      # filename pattern matching) requires Java 21 — ubuntu-latest's
+      # default JAVA_HOME is Java 17. Without this, cdxgen still runs and
+      # still produces a valid (if emptier) cbom-assets.json — confirmed via
+      # real CI logs: "Atom requires Java 21 or above... Unable to identify
+      # component evidence for the input SBOM based on the slices from
+      # atom" — so this was silently degrading every real CBOM scan to
+      # file-pattern-only detection (committed .pem/.key files, known
+      # third-party crypto libraries) with no source-level analysis at all.
+      - name: Set up Java 21 (for cdxgen's atom crypto analysis)
+        if: github.event_name == 'push'
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+
       # Confirmed working (tested against a real repo with a known crypto
       # dependency — correctly surfaced it plus an embedded private key and
       # CA cert as cryptographic-asset components): `--include-crypto` turns
