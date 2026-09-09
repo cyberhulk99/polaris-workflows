@@ -1,0 +1,51 @@
+# Reusable workflow — lives in <org>/polaris-workflows, same as
+# polaris-scr.yml. Generates a CycloneDX SBOM with Trivy — the same tool
+# already installed for SCA — and posts the raw document straight through;
+# the Java backend's CycloneDxParser does the actual parsing. Push-only by
+# design (see consumerWorkflow() in polaris-middleware): an SBOM describes
+# "what's in the repo right now", which a PR diff can't answer.
+name: Polaris SBOM
+
+on:
+  workflow_call:
+    inputs:
+      app_key:
+        required: true
+        type: string
+      polaris_url:
+        required: true
+        type: string
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  sbom:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Trivy
+        run: |
+          curl -sSfL https://raw.githubusercontent.com/aquasecurity/trivy/main/contrib/install.sh | sh -s -- -b /usr/local/bin
+
+      - name: Generate CycloneDX SBOM
+        run: trivy fs --format cyclonedx --output sbom.cdx.json .
+
+      - name: Request OIDC token for Polaris
+        id: oidc
+        run: |
+          TOKEN=$(curl -sS -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
+            "$ACTIONS_ID_TOKEN_REQUEST_URL&audience=polaris-ingest" | jq -r '.value')
+          echo "::add-mask::$TOKEN"
+          echo "token=$TOKEN" >> "$GITHUB_OUTPUT"
+
+      - name: Send SBOM to Polaris
+        run: |
+          curl -sS --fail \
+            -X POST \
+            -H "Authorization: Bearer ${{ steps.oidc.outputs.token }}" \
+            -H "Content-Type: application/json" \
+            --data-binary @sbom.cdx.json \
+            "${{ inputs.polaris_url }}/ingest/sbom?app_key=${{ inputs.app_key }}&commit=${{ github.sha }}"

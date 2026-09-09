@@ -1,0 +1,128 @@
+# Reusable workflow — lives in <org>/polaris-workflows, same as
+# polaris-scr.yml. Two independent halves in one job:
+#   1. Weak-crypto FINDINGS (Semgrep + rules/semgrep/crypto-weak.yml) —
+#      SARIF, runs on push and PR like SCR, posted to /ingest/cbom.
+#   2. Crypto-asset INVENTORY (cdxgen) — CycloneDX, push-only like SBOM,
+#      posted to /ingest/cbom-inventory.
+# Each half is skip-safe on its own (`|| true` / continue-on-error) so a
+# cdxgen version mismatch can't take down the weak-crypto findings, and
+# vice versa.
+name: Polaris CBOM
+
+on:
+  workflow_call:
+    inputs:
+      app_key:
+        required: true
+        type: string
+      polaris_url:
+        required: true
+        type: string
+      rules_repo:
+        required: true
+        type: string
+
+permissions:
+  contents: read
+  id-token: write
+  pull-requests: read
+  security-events: write
+
+jobs:
+  cbom:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      # --- Findings half: weak-crypto usage, push + PR ---
+      - name: Pull org security rules (optional)
+        continue-on-error: true
+        run: |
+          if git clone --depth 1 "https://github.com/${{ inputs.rules_repo }}.git" /tmp/security-rules 2>/dev/null; then
+            echo "org rules found"
+          else
+            echo "no org rules yet — scanning with the crypto-weak pack only"
+          fi
+
+      - name: Install Semgrep
+        run: pip install semgrep
+
+      - name: Run Semgrep (weak crypto)
+        run: |
+          CONFIG_ARGS=(--config /tmp/security-rules/rules/semgrep/crypto-weak.yml)
+          if [ ! -f /tmp/security-rules/rules/semgrep/crypto-weak.yml ]; then
+            echo "org rules repo unavailable — this reusable workflow's own copy of crypto-weak.yml must be vendored or fetched separately"
+            CONFIG_ARGS=(--config p/secrets)
+          fi
+          semgrep scan "${CONFIG_ARGS[@]}" --sarif --output cbom-findings.sarif || true
+          test -f cbom-findings.sarif
+
+      - name: Request OIDC token for Polaris (findings)
+        id: oidc-findings
+        run: |
+          TOKEN=$(curl -sS -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
+            "$ACTIONS_ID_TOKEN_REQUEST_URL&audience=polaris-ingest" | jq -r '.value')
+          echo "::add-mask::$TOKEN"
+          echo "token=$TOKEN" >> "$GITHUB_OUTPUT"
+
+      - name: Send crypto findings to Polaris
+        run: |
+          PR_NUMBER="${{ github.event.pull_request.number }}"
+          curl -sS --fail \
+            -X POST \
+            -H "Authorization: Bearer ${{ steps.oidc-findings.outputs.token }}" \
+            -H "Content-Type: application/sarif+json" \
+            --data-binary @cbom-findings.sarif \
+            "${{ inputs.polaris_url }}/ingest/cbom?app_key=${{ inputs.app_key }}&commit=${{ github.sha }}&pr=${PR_NUMBER:-0}"
+
+      # --- Inventory half: crypto-asset bill of materials, push-only ---
+      # Pinned: verified against this exact version (2026-09-09) that
+      # `--profile cryptography-bom` does NOT exist in its --profile choices
+      # (appsec/research/operational/threat-modeling/license-compliance/
+      # generic/machine-learning/ml/deep-learning/ml-deep/ml-tiny) — it was a
+      # guess from an older cdxgen release and silently produced zero output,
+      # so CBOM inventory ingestion has never actually run for any onboarded
+      # repo until this fix. `npm install -g` without a pin would have kept
+      # drifting onto whatever the flag du jour is.
+      - name: Install cdxgen
+        if: github.event_name == 'push'
+        run: npm install -g @cyclonedx/cdxgen@12.8.4
+
+      # Confirmed working (tested against a real repo with a known crypto
+      # dependency — correctly surfaced it plus an embedded private key and
+      # CA cert as cryptographic-asset components): `--include-crypto` turns
+      # on crypto-asset detection at all (off by default), and
+      # `--component-type cryptographic-asset` filters the emitted document
+      # down to just those — everything else here is SBOM's job, and the
+      # backend's CbomAssetParser already drops components without a
+      # cryptoProperties block regardless, so this is a payload-size
+      # optimization, not a correctness requirement.
+      - name: Generate CBOM (crypto assets)
+        if: github.event_name == 'push'
+        continue-on-error: true
+        run: cdxgen -o cbom-assets.json --include-crypto --component-type cryptographic-asset .
+
+      - name: Request OIDC token for Polaris (inventory)
+        if: github.event_name == 'push'
+        id: oidc-inventory
+        run: |
+          TOKEN=$(curl -sS -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
+            "$ACTIONS_ID_TOKEN_REQUEST_URL&audience=polaris-ingest" | jq -r '.value')
+          echo "::add-mask::$TOKEN"
+          echo "token=$TOKEN" >> "$GITHUB_OUTPUT"
+
+      - name: Send crypto-asset inventory to Polaris
+        if: github.event_name == 'push'
+        run: |
+          if [ ! -f cbom-assets.json ]; then
+            echo "cdxgen produced no output — skipping inventory ingest for this run"
+            exit 0
+          fi
+          curl -sS --fail \
+            -X POST \
+            -H "Authorization: Bearer ${{ steps.oidc-inventory.outputs.token }}" \
+            -H "Content-Type: application/json" \
+            --data-binary @cbom-assets.json \
+            "${{ inputs.polaris_url }}/ingest/cbom-inventory?app_key=${{ inputs.app_key }}&commit=${{ github.sha }}"

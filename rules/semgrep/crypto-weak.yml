@@ -1,0 +1,142 @@
+rules:
+  - id: cbom-weak-hash-md5-sha1
+    languages: [java, typescript, javascript, csharp, kotlin, python, go]
+    severity: WARNING
+    message: >-
+      MD5 or SHA-1 used as a cryptographic hash. Both are broken for
+      collision resistance — fine for a non-security checksum, unsafe for
+      passwords, signatures, or integrity checks.
+    metadata:
+      cwe: "CWE-327: Use of a Broken or Risky Cryptographic Algorithm"
+    patterns:
+      - pattern-either:
+          - pattern: hashlib.md5(...)
+          - pattern: hashlib.sha1(...)
+          - pattern: MessageDigest.getInstance("MD5")
+          - pattern: MessageDigest.getInstance("SHA-1")
+          - pattern: MessageDigest.getInstance("SHA1")
+          - pattern: crypto.createHash("md5")
+          - pattern: crypto.createHash("sha1")
+          - pattern: new MD5CryptoServiceProvider(...)
+          - pattern: new SHA1CryptoServiceProvider(...)
+
+  # Split by API family rather than one cross-language rule: constructor
+  # syntax (`new X(...)`) isn't valid outside Java/Kotlin/C#, and mixing it
+  # into a rule that also declares languages like Go or Python silently
+  # breaks matching entirely for every language in that rule — confirmed by
+  # hand against a live Semgrep install while writing this pack, not a
+  # theoretical concern.
+  - id: cbom-weak-cipher-des-rc4-jvm
+    languages: [java, kotlin]
+    severity: ERROR
+    message: >-
+      DES or RC4 used as a symmetric cipher. DES's 56-bit key is
+      brute-forceable today; RC4 has known keystream biases. Use AES-GCM or
+      ChaCha20-Poly1305.
+    metadata:
+      cwe: "CWE-327: Use of a Broken or Risky Cryptographic Algorithm"
+    patterns:
+      - pattern: Cipher.getInstance($MODE)
+      - metavariable-regex:
+          metavariable: $MODE
+          regex: '.*(^"DES|/DES/|^"RC4).*'
+
+  - id: cbom-weak-cipher-des-rc4-js
+    languages: [typescript, javascript]
+    severity: ERROR
+    message: >-
+      DES or RC4 used as a symmetric cipher. DES's 56-bit key is
+      brute-forceable today; RC4 has known keystream biases. Use AES-GCM or
+      ChaCha20-Poly1305.
+    metadata:
+      cwe: "CWE-327: Use of a Broken or Risky Cryptographic Algorithm"
+    patterns:
+      - pattern: crypto.createCipheriv($MODE, ...)
+      - metavariable-regex:
+          metavariable: $MODE
+          regex: '.*(des|rc4).*'
+
+  - id: cbom-aes-ecb-mode-jvm
+    languages: [java, kotlin]
+    severity: ERROR
+    message: >-
+      AES in ECB mode encrypts identical plaintext blocks to identical
+      ciphertext blocks, leaking structure. Use GCM or CBC with a random IV.
+    metadata:
+      cwe: "CWE-327: Use of a Broken or Risky Cryptographic Algorithm"
+    patterns:
+      - pattern: Cipher.getInstance($MODE)
+      - metavariable-regex:
+          metavariable: $MODE
+          regex: ".*AES/ECB.*"
+
+  - id: cbom-aes-ecb-mode-js
+    languages: [typescript, javascript]
+    severity: ERROR
+    message: >-
+      AES in ECB mode encrypts identical plaintext blocks to identical
+      ciphertext blocks, leaking structure. Use GCM or CBC with a random IV.
+    metadata:
+      cwe: "CWE-327: Use of a Broken or Risky Cryptographic Algorithm"
+    patterns:
+      - pattern: crypto.createCipheriv($MODE, ...)
+      - metavariable-regex:
+          metavariable: $MODE
+          regex: ".*aes.*ecb.*"
+
+  - id: cbom-hardcoded-crypto-key-jvm
+    languages: [java, kotlin]
+    severity: ERROR
+    message: >-
+      A cryptographic key or IV appears to be a hardcoded string literal
+      rather than loaded from a secrets manager or environment — anyone
+      with source access can decrypt or forge anything protected by it.
+    metadata:
+      cwe: "CWE-321: Use of Hard-coded Cryptographic Key"
+    patterns:
+      - pattern-either:
+          - pattern: new SecretKeySpec("...".getBytes(...), ...)
+          - pattern: $CIPHER.init($MODE, new SecretKeySpec("...", ...))
+
+  - id: cbom-hardcoded-crypto-key-js
+    languages: [typescript, javascript]
+    severity: ERROR
+    message: >-
+      A cryptographic key or IV appears to be a hardcoded string literal
+      rather than loaded from a secrets manager or environment — anyone
+      with source access can decrypt or forge anything protected by it.
+    metadata:
+      cwe: "CWE-321: Use of Hard-coded Cryptographic Key"
+    patterns:
+      - pattern-either:
+          - pattern: crypto.createCipheriv($ALGO, "...", ...)
+          - pattern: crypto.createDecipheriv($ALGO, "...", ...)
+
+  - id: cbom-undersized-rsa-key
+    languages: [java]
+    severity: WARNING
+    message: >-
+      RSA key generation with a modulus under 2048 bits — undersized against
+      current factoring capability. Generate at least 2048 bits (3072+ preferred).
+    metadata:
+      cwe: "CWE-326: Inadequate Encryption Strength"
+    patterns:
+      - pattern-either:
+          - pattern: $GEN.initialize(1024)
+          - pattern: $GEN.initialize(512)
+      - pattern-inside: |
+          $GEN = KeyPairGenerator.getInstance("RSA");
+          ...
+
+  - id: cbom-undersized-rsa-key-python
+    languages: [python]
+    severity: WARNING
+    message: >-
+      RSA key generation with a modulus under 2048 bits — undersized against
+      current factoring capability. Generate at least 2048 bits (3072+ preferred).
+    metadata:
+      cwe: "CWE-326: Inadequate Encryption Strength"
+    patterns:
+      - pattern-either:
+          - pattern: rsa.generate_private_key(public_exponent=..., key_size=1024, ...)
+          - pattern: rsa.generate_private_key(public_exponent=..., key_size=512, ...)

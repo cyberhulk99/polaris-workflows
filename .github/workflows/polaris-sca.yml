@@ -1,0 +1,99 @@
+# Reusable workflow — lives in <org>/polaris-workflows, same as
+# polaris-scr.yml. Runs three independent SCA scanners and merges their
+# SARIF into one document before ingestion: Polaris de-dupes across tools
+# by (repo, package, version, vulnerability id) — see ScaNormalizer in the
+# Java backend — so the same CVE reported by all three collapses into one
+# finding instead of three, the same way SCR already de-dupes across
+# Semgrep/Bandit/CodeQL/Gitleaks.
+name: Polaris SCA
+
+on:
+  workflow_call:
+    inputs:
+      app_key:
+        required: true
+        type: string
+      polaris_url:
+        required: true
+        type: string
+      rules_repo:
+        required: true
+        type: string
+
+permissions:
+  contents: read
+  id-token: write
+  pull-requests: read
+  security-events: write
+
+jobs:
+  sca:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Install Trivy
+        run: |
+          curl -sSfL https://raw.githubusercontent.com/aquasecurity/trivy/main/contrib/install.sh | sh -s -- -b /usr/local/bin
+
+      - name: Run Trivy (dependency vulnerabilities)
+        run: trivy fs --scanners vuln --format sarif --output trivy.sarif . || true
+
+      - name: Install Grype
+        run: |
+          curl -sSfL https://raw.githubusercontent.com/anchore/grype/main/install.sh | sh -s -- -b /usr/local/bin
+
+      - name: Run Grype
+        run: grype dir:. --output sarif --file grype.sarif || true
+
+      - name: Run OWASP Dependency-Check
+        uses: dependency-check/Dependency-Check_Action@main
+        continue-on-error: true
+        with:
+          project: ${{ inputs.app_key }}
+          path: "."
+          format: "SARIF"
+          out: "."
+
+      # Same merge pattern as SCR: structural concatenation of runs[], not
+      # content dedup — the DB's UNIQUE(repo, fingerprint) does the actual
+      # cross-tool dedup once ScaNormalizer computes each result's
+      # package-based fingerprint.
+      - name: Merge SARIF results
+        run: |
+          FILES=()
+          [ -f trivy.sarif ] && FILES+=(trivy.sarif)
+          [ -f grype.sarif ] && FILES+=(grype.sarif)
+          [ -f dependency-check-report.sarif ] && FILES+=(dependency-check-report.sarif)
+          if [ ${#FILES[@]} -eq 0 ]; then
+            echo '{"$schema":"https://raw.githubusercontent.com/oasis-tcs/sarif-spec/master/Schemata/sarif-schema-2.1.0.json","version":"2.1.0","runs":[]}' > combined.sarif
+          else
+            echo "Merging: ${FILES[*]}"
+            jq -s '{"$schema": .[0]["$schema"], version: .[0].version, runs: (map(.runs) | add)}' "${FILES[@]}" > combined.sarif
+          fi
+
+      - name: Upload SARIF to GitHub code scanning
+        continue-on-error: true
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: combined.sarif
+
+      - name: Request OIDC token for Polaris
+        id: oidc
+        run: |
+          TOKEN=$(curl -sS -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
+            "$ACTIONS_ID_TOKEN_REQUEST_URL&audience=polaris-ingest" | jq -r '.value')
+          echo "::add-mask::$TOKEN"
+          echo "token=$TOKEN" >> "$GITHUB_OUTPUT"
+
+      - name: Send results to Polaris
+        run: |
+          PR_NUMBER="${{ github.event.pull_request.number }}"
+          curl -sS --fail \
+            -X POST \
+            -H "Authorization: Bearer ${{ steps.oidc.outputs.token }}" \
+            -H "Content-Type: application/sarif+json" \
+            --data-binary @combined.sarif \
+            "${{ inputs.polaris_url }}/ingest/sca?app_key=${{ inputs.app_key }}&commit=${{ github.sha }}&pr=${PR_NUMBER:-0}"

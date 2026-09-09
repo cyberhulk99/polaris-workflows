@@ -122,6 +122,48 @@ jobs:
           # ingestion — only a genuinely missing/corrupt SARIF output should.
           test -f semgrep.sarif
 
+      # Opengrep is the community-governed fork of the Semgrep engine (forked
+      # from Semgrep 1.100.0 after Semgrep Inc. restricted parts of its rule
+      # registry under a new license) — CLI- and rule-syntax-compatible, so
+      # it runs the exact same --config packs and org rules as the Semgrep
+      # step above. Running both isn't pure duplication: the two engines'
+      # implementations diverge since the fork point, so each occasionally
+      # flags something the other misses, and it's a hedge against future
+      # Semgrep registry/licensing changes cutting off access to these packs.
+      # continue-on-error because this is a second opinion, not the primary
+      # scanner — an Opengrep hiccup must never block Semgrep's results from
+      # reaching ingestion.
+      - name: Install Opengrep
+        run: curl -fsSL https://raw.githubusercontent.com/opengrep/opengrep/main/install.sh | bash
+
+      - name: Run Opengrep
+        continue-on-error: true
+        run: |
+          export PATH="$HOME/.opengrep/cli/latest:$PATH"
+          BASELINE_ARGS=()
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            BASELINE_ARGS=(--baseline-commit "${{ github.event.pull_request.base.sha }}")
+          fi
+          CONFIG_ARGS=(
+            --config p/owasp-top-ten
+            --config p/cwe-top-25
+            --config p/security-audit
+            --config p/secrets
+            --config p/python
+            --config p/javascript
+            --config p/typescript
+            --config p/golang
+            --config p/java
+            --config p/docker
+          )
+          if [ -d /tmp/security-rules/rules/semgrep ]; then
+            CONFIG_ARGS+=(--config /tmp/security-rules/rules/semgrep)
+          fi
+          opengrep scan \
+            "${CONFIG_ARGS[@]}" \
+            --sarif-output=opengrep.sarif \
+            "${BASELINE_ARGS[@]}" || true
+
       # Bandit is Python-specific AST analysis — catches patterns (e.g.
       # unsafe deserialization, weak crypto idioms, assert-based checks that
       # vanish under `python -O`) that Semgrep's pattern matching sometimes
@@ -189,6 +231,7 @@ jobs:
       - name: Merge SARIF results
         run: |
           FILES=(semgrep.sarif)
+          [ -f opengrep.sarif ] && FILES+=(opengrep.sarif)
           [ -f bandit.sarif ] && FILES+=(bandit.sarif)
           for f in codeql-results/*.sarif; do [ -f "$f" ] && FILES+=("$f"); done
           echo "Merging: ${FILES[*]}"
