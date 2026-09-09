@@ -99,6 +99,8 @@ jobs:
             --config p/command-injection
             --config p/jwt
             --config p/insecure-transport
+            --config p/xss
+            --config p/supply-chain
             # Framework-specific packs — where most real injection sinks
             # actually live (raw queries, template rendering, request routing).
             --config p/flask
@@ -106,6 +108,19 @@ jobs:
             --config p/expressjs
             --config p/nodejsscan
             --config p/react
+            # IaC / infra-as-code — a genuinely new class of misconfiguration
+            # this scanner didn't cover at all before (Dockerfile-only via
+            # p/docker), and both packs are silently skipped on repos with no
+            # matching files, same as every other pack here.
+            --config p/terraform
+            --config p/kubernetes
+            --config p/nginx
+            # Broader language spread — zero-cost on repos that don't use
+            # these languages, catches real findings on repos that do.
+            --config p/ruby
+            --config p/php
+            --config p/kotlin
+            --config p/swift
           )
           if [ -d /tmp/security-rules/rules/semgrep ]; then
             CONFIG_ARGS+=(--config /tmp/security-rules/rules/semgrep)
@@ -126,13 +141,16 @@ jobs:
       # from Semgrep 1.100.0 after Semgrep Inc. restricted parts of its rule
       # registry under a new license) — CLI- and rule-syntax-compatible, so
       # it runs the exact same --config packs and org rules as the Semgrep
-      # step above. Running both isn't pure duplication: the two engines'
-      # implementations diverge since the fork point, so each occasionally
-      # flags something the other misses, and it's a hedge against future
-      # Semgrep registry/licensing changes cutting off access to these packs.
-      # continue-on-error because this is a second opinion, not the primary
-      # scanner — an Opengrep hiccup must never block Semgrep's results from
-      # reaching ingestion.
+      # step above (kept in sync by hand — there are two copies of this list
+      # in this file on purpose, one per engine; a previous version of this
+      # step only had the first 10 of these packs, silently missing the
+      # other 18 that Semgrep was already running). Running both isn't pure
+      # duplication: the two engines' implementations diverge since the fork
+      # point, so each occasionally flags something the other misses, and
+      # it's a hedge against future Semgrep registry/licensing changes
+      # cutting off access to these packs. continue-on-error because this is
+      # a second opinion, not the primary scanner — an Opengrep hiccup must
+      # never block Semgrep's results from reaching ingestion.
       - name: Install Opengrep
         run: curl -fsSL https://raw.githubusercontent.com/opengrep/opengrep/main/install.sh | bash
 
@@ -155,6 +173,24 @@ jobs:
             --config p/golang
             --config p/java
             --config p/docker
+            --config p/sql-injection
+            --config p/command-injection
+            --config p/jwt
+            --config p/insecure-transport
+            --config p/xss
+            --config p/supply-chain
+            --config p/flask
+            --config p/django
+            --config p/expressjs
+            --config p/nodejsscan
+            --config p/react
+            --config p/terraform
+            --config p/kubernetes
+            --config p/nginx
+            --config p/ruby
+            --config p/php
+            --config p/kotlin
+            --config p/swift
           )
           if [ -d /tmp/security-rules/rules/semgrep ]; then
             CONFIG_ARGS+=(--config /tmp/security-rules/rules/semgrep)
