@@ -291,12 +291,22 @@ jobs:
           echo "::add-mask::$TOKEN"
           echo "token=$TOKEN" >> "$GITHUB_OUTPUT"
 
+      # The merge gate: a non-2xx here already fails the job (--fail), but a
+      # *successful* ingest can still report a policy violation in its JSON
+      # body — that's what actually fails the job on a blocked PR, which is
+      # what lets a repo's branch protection mark this job "required" and
+      # get real merge-blocking out of it.
       - name: Send results to Polaris
         run: |
           PR_NUMBER="${{ github.event.pull_request.number }}"
-          curl -sS --fail \
+          RESPONSE=$(curl -sS --fail \
             -X POST \
             -H "Authorization: Bearer ${{ steps.oidc.outputs.token }}" \
             -H "Content-Type: application/sarif+json" \
             --data-binary @combined.sarif \
-            "${{ inputs.polaris_url }}/ingest/scr?app_key=${{ inputs.app_key }}&commit=${{ github.sha }}&pr=${PR_NUMBER:-0}"
+            "${{ inputs.polaris_url }}/ingest/scr?app_key=${{ inputs.app_key }}&commit=${{ github.sha }}&pr=${PR_NUMBER:-0}")
+          echo "$RESPONSE"
+          if [ "$(echo "$RESPONSE" | jq -r '.policy_violation')" = "true" ]; then
+            echo "::error::Merge gate blocked — $(echo "$RESPONSE" | jq -r '.policy_reason')"
+            exit 1
+          fi

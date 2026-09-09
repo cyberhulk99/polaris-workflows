@@ -67,15 +67,22 @@ jobs:
           echo "::add-mask::$TOKEN"
           echo "token=$TOKEN" >> "$GITHUB_OUTPUT"
 
+      # See polaris-scr.yml's own copy of this step for why the job can
+      # still fail here even though the ingest itself succeeded.
       - name: Send crypto findings to Polaris
         run: |
           PR_NUMBER="${{ github.event.pull_request.number }}"
-          curl -sS --fail \
+          RESPONSE=$(curl -sS --fail \
             -X POST \
             -H "Authorization: Bearer ${{ steps.oidc-findings.outputs.token }}" \
             -H "Content-Type: application/sarif+json" \
             --data-binary @cbom-findings.sarif \
-            "${{ inputs.polaris_url }}/ingest/cbom?app_key=${{ inputs.app_key }}&commit=${{ github.sha }}&pr=${PR_NUMBER:-0}"
+            "${{ inputs.polaris_url }}/ingest/cbom?app_key=${{ inputs.app_key }}&commit=${{ github.sha }}&pr=${PR_NUMBER:-0}")
+          echo "$RESPONSE"
+          if [ "$(echo "$RESPONSE" | jq -r '.policy_violation')" = "true" ]; then
+            echo "::error::Merge gate blocked — $(echo "$RESPONSE" | jq -r '.policy_reason')"
+            exit 1
+          fi
 
       # --- Inventory half: crypto-asset bill of materials, push-only ---
       # Pinned: verified against this exact version (2026-09-09) that
